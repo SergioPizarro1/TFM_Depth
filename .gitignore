@@ -1,0 +1,23 @@
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Entorno virtual ---
+.venv/
+
+# --- Datos ---
+Data/
+
+# --- Experimentos ---
+runs/
+
+# --- Imágenes temporales ---
+# *.png
+test_varios.py
+
+test_dimensions.py
+
+inpect_names.py
+
+diag_nyu_depths.py
+

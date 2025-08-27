@@ -1,0 +1,22 @@
+# PyTorch stack (ajusta a tu CUDA, aquí 12.1 para RTX 4090)
+torch==2.8.0+cu126
+torchvision==0.23.0+cu126
+torchaudio==2.8.0+cu126
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+# NumPy & SciPy
+numpy
+scipy
+
+# Visualización
+matplotlib
+
+# Imágenes
+pillow
+opencv-python-headless
+
+# Data
+pandas
+
+# Utilidades
+tqdm
