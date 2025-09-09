@@ -1,9 +1,8 @@
 # train_bts_nyu.py
-import os
+import os, time, csv
 import math
 import argparse
 from datetime import datetime
-import inspect
 
 import torch
 import torch.nn as nn
@@ -63,10 +62,10 @@ def poly_decay_lambda(step, total_steps, base_lr, end_lr, power=0.9):
 # ===========================
 
 @torch.no_grad()
-def validate(model, loader, device, max_depth, save_dir=None, save_n=6, focal=None, amp=True):
+def validate(model, loader, device, max_depth, min_depth, save_dir=None, save_n=6, focal=None, amp=True):
     model.eval()
     agg = {"absrel": 0.0, "rmse": 0.0, "rmse_log": 0.0, "delta1": 0.0, "delta2": 0.0, "delta3": 0.0}
-    steps = 0
+    loss_sum, steps = 0.0, 0
     #accepts_focal = has_kwarg(model, "focal")
 
     for i, (rgb, gt, f) in enumerate(loader):
@@ -80,6 +79,10 @@ def validate(model, loader, device, max_depth, save_dir=None, save_n=6, focal=No
             if pred.shape[-2:] != gt.shape[-2:]:
                 pred = F.interpolate(pred, size=gt.shape[-2:], mode="bilinear", align_corners=False)
 
+            valid = (gt > min_depth) & (gt < max_depth)
+            vloss = silog_loss(pred, gt, valid)
+
+        loss_sum += float(vloss)
         m = evaluate_batch(pred, gt)
         for k in agg: agg[k] += m[k]
         steps += 1
@@ -93,7 +96,10 @@ def validate(model, loader, device, max_depth, save_dir=None, save_n=6, focal=No
 
     if steps > 0:
         for k in agg: agg[k] /= steps
-    return agg
+        val_silog = loss_sum / steps
+    else:
+        val_silog = 0.0
+    return agg, val_silog
 
 
 # ===========================
@@ -176,23 +182,38 @@ def train(args):
     if args.eval_only:
         save_dir = os.path.join(args.output_dir, "eval_" + datetime.now().strftime("%Y%m%d-%H%M%S"))
         os.makedirs(save_dir, exist_ok=True)
-        metrics = validate(model, val_loader, device, args.max_depth,
+        metrics, val_silog = validate(model, val_loader, device, args.max_depth, args.min_depth,
                            save_dir if args.save_imgs else None, save_n=12,
                            focal=args.focal, amp=args.amp)
-        print("[Eval]", metrics)
+        print("[Eval]", metrics, "val_silog:", f"{val_silog:.4f}")
         return
+    
+    # ---- CSV
+    csv_path = os.path.join(args.output_dir, "metrics.csv")
+    if not os.path.exists(csv_path):
+        with open(csv_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["epoch","train_silog","val_silog","val_absrel","val_rmse","val_rmse_log",
+                        "val_delta1","val_delta2","val_delta3","epoch_time_sec","gpu_peak_mb"])
 
-    # ---- Loop ----
-    best_delta1 = 0.0
+    # ---- Early stopping ----
+    monitor = args.early_stop_metric.lower()
+    assert monitor in ("delta1", "val_silog")
+    best_val = -float("inf") if monitor == "delta1" else float("inf")
+    no_improve = 0
 
+    def better(curr, best):
+        return (curr > best) if monitor == "delta1" else (curr < best)
+    """
     history = {"train_silog": [], "val_absrel": [], "val_rmse": [], "val_rmse_log": [],
            "val_delta1": [], "val_delta2": [], "val_delta3": []}
     plots_dir = os.path.join(args.output_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    #accepts_focal = has_kwarg(model, "focal")
-
+    """
     for epoch in range(start_epoch, args.epochs):
         model.train()
+        t0 = time.time()
+        if torch.cuda.is_available(): torch.cuda.reset_peak_memory_stats()
         # acumulador de pérdida media por época
         running_loss, running_count = 0.0, 0
 
@@ -204,7 +225,7 @@ def train(args):
 
         for it, (rgb, gt, f) in enumerate(train_loader):
             rgb, gt = rgb.to(device, non_blocking=True), gt.to(device, non_blocking=True)
-            valid = (gt > 1e-3) & (gt < args.max_depth)
+            valid = (gt > args.min_depth) & (gt < args.max_depth)
 
             optimizer.zero_grad(set_to_none=True)
             with autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", enabled=args.amp):
@@ -245,50 +266,46 @@ def train(args):
         train_loss_epoch = running_loss / max(1, running_count)
         save_dir = os.path.join(args.output_dir, f"val_ep{epoch:02d}")
         os.makedirs(save_dir, exist_ok=True)
-        val_metrics = validate(model, val_loader, device, args.max_depth,
+        val_metrics, val_silog = validate(model, val_loader, device, args.max_depth, args.min_depth,
                                save_dir if args.save_imgs else None, save_n=12,
                                focal=args.focal, amp=args.amp)
 
-        # Imprime resumen por época (lo que pedías)
-        print(f"[Epoch {epoch:02d}] train_silog: {train_loss_epoch:.4f} | "
-              f"val_absrel: {val_metrics['absrel']:.4f} | "
-              f"val_rmse: {val_metrics['rmse']:.4f} | "
-              f"val_rmse_log: {val_metrics['rmse_log']:.4f} | "
-              f"val_delta1: {val_metrics['delta1']:.4f} | "
-              f"val_delta2: {val_metrics['delta2']:.4f} | "
-              f"val_delta3: {val_metrics['delta3']:.4f}")
+        epoch_time = time.time() - t0
+        peak_mb = torch.cuda.max_memory_allocated()/(1024**2) if torch.cuda.is_available() else 0.0
+        # Imprime resumen por época
+        print(f"[Epoch {epoch:02d}] train_silog: {train_loss_epoch:.4f} | val_silog: {val_silog:.4f} | "
+              f"val_absrel: {val_metrics['absrel']:.4f} | val_rmse: {val_metrics['rmse']:.4f} | "
+              f"val_rmse_log: {val_metrics['rmse_log']:.4f} | val_delta1: {val_metrics['delta1']:.4f} | "
+              f"val_delta2: {val_metrics['delta2']:.4f} | val_delta3: {val_metrics['delta3']:.4f} | "
+              f"time: {epoch_time:.1f}s | gpu_peak: {peak_mb:.0f}MB")
 
+        # CSV
+        with open(csv_path, "a", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([epoch, f"{train_loss_epoch:.6f}", f"{val_silog:.6f}",
+                        f"{val_metrics['absrel']:.6f}", f"{val_metrics['rmse']:.6f}",
+                        f"{val_metrics['rmse_log']:.6f}", f"{val_metrics['delta1']:.6f}",
+                        f"{val_metrics['delta2']:.6f}", f"{val_metrics['delta3']:.6f}",
+                        f"{epoch_time:.3f}", f"{peak_mb:.1f}"])
         # Guardados
-        is_best = val_metrics["delta1"] > best_delta1
+        monitored_value = val_metrics["delta1"] if monitor == "delta1" else val_silog
+        is_best = better(monitored_value, best_val)
         if is_best:
-            best_delta1 = val_metrics["delta1"]
-
-        history["train_silog"].append(train_loss_epoch)
-        for k in ["absrel", "rmse", "rmse_log", "delta1", "delta2", "delta3"]:
-            history[f"val_{k}"].append(val_metrics[k])
-        
-        # Dibujar y guardar curvas (loss + métricas principales)
-        import matplotlib.pyplot as plt
-        # 1) Pérdida (train_silog)
-        plt.figure()
-        plt.plot(history["train_silog"], label="train_silog")
-        plt.xlabel("epoch"); plt.ylabel("loss")
-        plt.title("SiLog (train)")
-        plt.grid(True, alpha=0.3); plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "loss_train_silog.png"), dpi=120)
-        plt.close()
-
-        # 2) Métricas val (AbsRel + δ1)
-        plt.figure()
-        plt.plot(history["val_absrel"], label="val_absrel")
-        plt.plot(history["val_delta1"], label="val_delta1")
-        plt.xlabel("epoch"); plt.ylabel("value")
-        plt.title("Val metrics")
-        plt.grid(True, alpha=0.3); plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "val_metrics.png"), dpi=120)
-        plt.close()
+            best_val = monitored_value
+            no_improve = 0
+            ckpt_best = {
+                "epoch": epoch + 1,
+                "step": global_step,
+                "model": model.state_dict() if not isinstance(model, nn.DataParallel) else model.module.state_dict(),
+                "opt": optimizer.state_dict(),
+                "sched": scheduler.state_dict(),
+                "metrics": val_metrics,
+                "args": vars(args)
+            }
+            torch.save(ckpt_best, os.path.join(args.output_dir, "best.pth"))
+            print(f"=> Nuevo BEST por {monitor}, guardado.")
+        else:
+            no_improve += 1
         
         ckpt = {
             "epoch": epoch + 1,
@@ -300,9 +317,10 @@ def train(args):
             "args": vars(args)
         }
         torch.save(ckpt, os.path.join(args.output_dir, "last.pth"))
-        if is_best:
-            torch.save(ckpt, os.path.join(args.output_dir, "best.pth"))
-            print("=> Nuevo BEST por δ1, guardado.")
+        
+        if no_improve >= args.patience:
+            print(f"=> Early stopping activado: sin mejora en {args.patience} épocas según '{monitor}'.")
+            break
 
 
 # ===========================
@@ -316,6 +334,7 @@ def get_parser():
     p.add_argument("--val_csv",   type=str, default="./Data/nyu_data/data/nyu2_test.csv")
     p.add_argument("--input_height", type=int, default=480)
     p.add_argument("--input_width",  type=int, default=640)
+    p.add_argument("--min_depth", type=float, default=1e-3)
     p.add_argument("--max_depth", type=float, default=10.0)
     p.add_argument("--focal", type=float, default=518.8579, help="NYU fx en píxeles (si tu modelo la usa)")
 
@@ -337,6 +356,13 @@ def get_parser():
     # Congelado estilo BTS
     p.add_argument("--freeze_stem_bn", action="store_true", default=True,
                    help="Congela conv1/layer1/layer2 + todos los BN (warmup)")
+    
+    # Early stopping
+    p.add_argument("--early_stop_metric", type=str, default="delta1",
+                   choices=["delta1", "val_silog"],
+                   help="Métrica a monitorizar para early stopping (max delta1 / min val_silog)")
+    p.add_argument("--patience", type=int, default=6,
+                   help="Épocas sin mejora antes de detener")
 
     # Misc
     p.add_argument("--output_dir", type=str, default="./runs/nyu_bts")
