@@ -126,7 +126,14 @@ def train(args):
             w.writerow(["epoch","train_silog","val_silog","val_absrel","val_rmse","val_rmse_log",
                         "val_delta1","val_delta2","val_delta3","epoch_time_sec","gpu_peak_mb"])
 
-    best_delta1 = 0.0
+    # ---- Early stopping ----
+    monitor = args.early_stop_metric.lower()
+    assert monitor in ("delta1", "val_silog")
+    best_val = -float("inf") if monitor == "delta1" else float("inf")
+    no_improve = 0
+
+    def better(curr, best):
+        return (curr > best) if monitor == "delta1" else (curr < best)
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
@@ -199,19 +206,37 @@ def train(args):
                         f"{epoch_time:.3f}", f"{peak_mb:.1f}"])
 
         # Guardados
-        is_best = val_metrics["delta1"] > best_delta1
-        if is_best: best_delta1 = val_metrics["delta1"]
+        monitored_value = val_metrics["delta1"] if monitor == "delta1" else val_silog
+        is_best = better(monitored_value, best_val)
+        if is_best:
+            best_val = monitored_value
+            no_improve = 0
+            ckpt_best = {
+                "epoch": epoch + 1,
+                "step": global_step,
+                "model": model.state_dict() if not isinstance(model, nn.DataParallel) else model.module.state_dict(),
+                "opt": optimizer.state_dict(),
+                "metrics": val_metrics,
+                "args": vars(args)
+            }
+            torch.save(ckpt_best, os.path.join(args.output_dir, "best.pth"))
+            print(f"=> Nuevo BEST por {monitor}, guardado.")
+        else:
+            no_improve += 1
 
         ckpt = {
-            "epoch": epoch + 1, "step": global_step,
+            "epoch": epoch + 1,
+            "step": global_step,
             "model": model.state_dict() if not isinstance(model, nn.DataParallel) else model.module.state_dict(),
             "opt": optimizer.state_dict(),
-            "metrics": val_metrics, "args": vars(args)
+            "metrics": val_metrics,
+            "args": vars(args)
         }
         torch.save(ckpt, os.path.join(args.output_dir, "last.pth"))
-        if is_best:
-            torch.save(ckpt, os.path.join(args.output_dir, "best.pth"))
-            print("=> Nuevo BEST por δ1, guardado.")
+        
+        if no_improve >= args.patience:
+            print(f"=> Early stopping activado: sin mejora en {args.patience} épocas según '{monitor}'.")
+            break
 
 
 def get_parser():
@@ -235,6 +260,12 @@ def get_parser():
     p.add_argument("--lr_backbone", type=float, default=1e-5)
     p.add_argument("--lr_decoder",  type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-2)
+    # Early stopping
+    p.add_argument("--early_stop_metric", type=str, default="delta1",
+                   choices=["delta1", "val_silog"],
+                   help="Métrica a monitorizar para early stopping (max delta1 / min val_silog)")
+    p.add_argument("--patience", type=int, default=6,
+                   help="Épocas sin mejora antes de detener")
     # Misc
     p.add_argument("--output_dir", type=str, default="./runs/nyu_dpt")
     p.add_argument("--resume", type=str, default="")

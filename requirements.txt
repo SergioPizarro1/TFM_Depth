@@ -20,3 +20,6 @@ pandas
 
 # Utilidades
 tqdm
+
+# ViT
+timm
