@@ -1,7 +1,6 @@
-# utils/metrics.py
 import torch
 
-def _valid_mask(gt, min_depth=1e-3, max_depth=1e6):
+def _valid_mask(gt, min_depth=1e-3, max_depth=10.0):
     return (gt > min_depth) & (gt < max_depth) & torch.isfinite(gt)
 
 def abs_rel(pred, gt):

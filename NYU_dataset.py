@@ -8,22 +8,19 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as TF
 
-
 class PairedRandomHorizontalFlip:
+    """ Flip horizontal conjunto RGB/Depth con probabilidad p."""
     def __init__(self, p=0.5): 
         self.p = p
     def __call__(self, img, depth):
         if random.random() < self.p:
             img   = TF.hflip(img)
             depth = TF.hflip(depth)
-        #if random.random() < self.p:
-            #img   = TF.vflip(img)
-            #depth = TF.vflip(depth)
         return img, depth
 
 class PairedColorJitter:
+    """ Jitter conjunto RGB/Depth (sólo afecta a RGB)."""
     def __init__(self, brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05):
-        self.j = torch.nn.Sequential()  # placeholder to store params if needed
         self.brightness = brightness 
         self.contrast=contrast
         self.saturation = saturation
@@ -35,19 +32,7 @@ class PairedColorJitter:
         img = TF.adjust_saturation(img, 1.0 + (2*random.random()-1.0)*self.saturation)
         img = TF.adjust_hue(img,        (2*random.random()-1.0)*self.hue)
         return img, depth
-""""
-class PairedRandomResizedCrop:
-    #Recorte y *resize* idénticos para img y depth.
-    def __init__(self, size: Tuple[int,int], scale=(0.8, 1.0), ratio=(1.0,1.0)):
-        self.size = size
-        self.scale=scale
-        self.ratio=ratio
-    def __call__(self, img, depth):
-        i, j, h, w =  TF.get_params(img, self.scale, self.ratio)
-        img   = TF.resized_crop(img,   i, j, h, w, self.size, interpolation=TF.InterpolationMode.BILINEAR)
-        depth = TF.resized_crop(depth, i, j, h, w, self.size, interpolation=TF.InterpolationMode.NEAREST)
-        return img, depth
-"""
+
 class PairRandomRotate:
     """
     Rotación conjunta RGB/Depth en grados pequeños (p.ej. +/-5).
@@ -63,11 +48,22 @@ class PairRandomRotate:
         if random.random() > self.p or self.degrees <= 0:
             return img, depth
         angle = random.uniform(-self.degrees, self.degrees)
-        # PIL inputs -> PIL outputs (si usas PIL en tu dataset)
         img_r   = TF.rotate(img,   angle, interpolation=TF.InterpolationMode.BILINEAR, fill=(0,0,0))
         depth_r = TF.rotate(depth, angle, interpolation=TF.InterpolationMode.NEAREST,  fill=0)
         return img_r, depth_r
-    
+""""
+class PairedRandomResizedCrop:
+    #Recorte y *resize* idénticos para img y depth.
+    def __init__(self, size: Tuple[int,int], scale=(0.8, 1.0), ratio=(1.0,1.0)):
+        self.size = size
+        self.scale=scale
+        self.ratio=ratio
+    def __call__(self, img, depth):
+        i, j, h, w =  TF.get_params(img, self.scale, self.ratio)
+        img   = TF.resized_crop(img,   i, j, h, w, self.size, interpolation=TF.InterpolationMode.BILINEAR)
+        depth = TF.resized_crop(depth, i, j, h, w, self.size, interpolation=TF.InterpolationMode.NEAREST)
+        return img, depth
+"""
 
 # datasets/nyu_depth_v2_kaggle.py
 class NYUDepthV2CSV(Dataset):
@@ -85,7 +81,7 @@ class NYUDepthV2CSV(Dataset):
         self.std = std
         #print(self.df.head())
 
-        # augmentations compartidas (igual que tu otra clase)
+        # augmentations compartidas 
         self.paired = []
         if self.aug:
             self.paired += [
@@ -119,7 +115,7 @@ class NYUDepthV2CSV(Dataset):
             # Ya viene en metros
             depth_m = depth_np.astype(np.float32)
         else:
-            # Fallback prudente
+            # Fallback
             depth_m = depth_np.astype(np.float32)
 
         # Clip de seguridad a [0, max_depth]
@@ -149,14 +145,13 @@ def make_nyu_csv_loaders(
     val_csv:   str = "./Data/nyu_data/data/nyu2_test.csv",
     image_size: Tuple[int, int] = (480, 640),
     batch_size: int = 8,
-    num_workers: int = 8,
+    num_workers: int = 4,
     max_depth: float = 10.0,
     augment_train: bool = True,
 ):
-    #print(train_csv, val_csv)
     """
-    Crea DataLoaders para entrenamiento y validación usando tus CSV.
-    Ajusta train_csv/val_csv si cambias tu estructura de carpetas.
+    Crea DataLoaders para entrenamiento y validación usando los CSV.
+    Ajustar train_csv/val_csv si cambia la estructura de carpetas.
     """
     train_set = NYUDepthV2CSV(
         csv_file=train_csv,

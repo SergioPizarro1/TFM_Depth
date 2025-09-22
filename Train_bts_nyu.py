@@ -51,6 +51,8 @@ def count_trainable(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def poly_decay_lambda(step, total_steps, base_lr, end_lr, power=0.9):
+    # Decaimiento polinómico del learning rate como un factor relativo al learning rate inicial
+    # (tal y como lo espera LambdaLR)
     if total_steps <= 0:
         return 1.0
     step = min(step, total_steps)

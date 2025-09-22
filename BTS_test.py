@@ -17,6 +17,7 @@ class silog_loss(nn.Module):
     
 
 class atrous_conv(nn.Sequential):
+    """Aplica una capa ASPP (Atrous Spatial Pyramid Pooling)."""
     # [B, C_in, H, W] -> [B, C_out, H, W]
     def __init__(self, in_channels, out_channels, dilation, apply_bn_first=True):
         super(atrous_conv, self).__init__()
@@ -25,21 +26,23 @@ class atrous_conv(nn.Sequential):
             self.atrous_conv.add_module('first_bn', nn.BatchNorm2d(in_channels, momentum=0.01, affine=True, track_running_stats=True, eps=1.1e-5))
         
         self.atrous_conv.add_module('aconv_sequence', nn.Sequential(nn.ReLU(),
-                                                                    nn.Conv2d(in_channels=in_channels, out_channels=out_channels*2, bias=False, kernel_size=1, stride=1, padding=0),
+                                                                    nn.Conv2d(in_channels=in_channels, out_channels=out_channels*2, kernel_size=1, stride=1,
+                                                                               padding=0, bias=False),
                                                                     nn.BatchNorm2d(out_channels*2, momentum=0.01, affine=True, track_running_stats=True),
                                                                     nn.ReLU(),
-                                                                    nn.Conv2d(in_channels=out_channels * 2, out_channels=out_channels, bias=False, kernel_size=3, stride=1,
-                                                                              padding=(dilation, dilation), dilation=dilation)))
+                                                                    nn.Conv2d(in_channels=out_channels * 2, out_channels=out_channels, kernel_size=3, stride=1,
+                                                                              padding=(dilation, dilation), dilation=dilation, bias=False)))
 
     def forward(self, x):
         return self.atrous_conv.forward(x)
 
 class upconv(nn.Module):
+    """Aplica una capa de upsampling, subiendo la resolución x2."""
     # [B, C_in, H, W] -> [B, C_out, H*2, W*2]
     def __init__(self, in_channels, out_channels, ratio=2):
         super(upconv, self).__init__()
         self.elu = nn.ELU()
-        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, bias=False, kernel_size=3, stride=1, padding=1)
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1, bias=False)
         self.ratio = ratio
         
     def forward(self, x):
@@ -49,6 +52,8 @@ class upconv(nn.Module):
         return out
 
 class reduction_1x1(nn.Sequential):
+    """Aplica una capa de reducción a las características de entrada.
+       Devuelve parámetros de plano (n1,n2,n3,n4) o profundidad final."""
     # [B, N, H, W] -> [B, 4, H, W] or [B, 1, H, W] (if is_final=True)
     def __init__(self, num_in_filters, num_out_filters, max_depth, is_final=False):
         super(reduction_1x1, self).__init__()        
@@ -60,17 +65,14 @@ class reduction_1x1(nn.Sequential):
         while num_out_filters >= 4:
             if num_out_filters < 8:
                 if self.is_final:
-                    self.reduc.add_module('final', torch.nn.Sequential(nn.Conv2d(num_in_filters, out_channels=1, bias=False,
-                                                                                 kernel_size=1, stride=1, padding=0),
+                    self.reduc.add_module('final', torch.nn.Sequential(nn.Conv2d(num_in_filters, out_channels=1, kernel_size=1, stride=1, padding=0, bias=False),
                                                                        nn.Sigmoid()))
                 else:
-                    self.reduc.add_module('plane_params', torch.nn.Conv2d(num_in_filters, out_channels=3, bias=False,
-                                                                          kernel_size=1, stride=1, padding=0))
+                    self.reduc.add_module('plane_params', torch.nn.Conv2d(num_in_filters, out_channels=3, kernel_size=1, stride=1, padding=0, bias=False))
                 break
             else:
                 self.reduc.add_module('inter_{}_{}'.format(num_in_filters, num_out_filters),
-                                      torch.nn.Sequential(nn.Conv2d(in_channels=num_in_filters, out_channels=num_out_filters,
-                                                                    bias=False, kernel_size=1, stride=1, padding=0),
+                                      torch.nn.Sequential(nn.Conv2d(in_channels=num_in_filters, out_channels=num_out_filters, kernel_size=1, stride=1, padding=0, bias=False),
                                                           nn.ELU()))
 
             num_in_filters = num_out_filters
@@ -92,11 +94,12 @@ class reduction_1x1(nn.Sequential):
 
 
 class local_planar_guidance(nn.Module):
+    """Aplica el módulo local planar guidance."""
     # plane_eq: [B, 4, H, W] (n1, n2, n3, n4) -> [B, H*upratio, W*upratio]
     def __init__(self, upratio):
         super(local_planar_guidance, self).__init__()
         self.upratio = upratio
-        self.u = torch.arange(self.upratio).reshape([1, 1, self.upratio]).float() # [1, 1, upratio]
+        self.u = torch.arange(self.upratio).reshape([1, 1, self.upratio]).float() # [1, 1, upratio]                 
         self.v = torch.arange(int(self.upratio)).reshape([1, self.upratio, 1]).float() # [1, upratio, 1]
         self.upratio = float(upratio)
 
@@ -123,12 +126,12 @@ class bts(nn.Module):
 
         self.upconv5    = upconv(feat_out_channels[4], num_features)
         self.bn5        = nn.BatchNorm2d(num_features, momentum=0.01, affine=True, eps=1.1e-5)
-        
-        self.conv5      = torch.nn.Sequential(nn.Conv2d(num_features + feat_out_channels[3], num_features, 3, 1, 1, bias=False),
+
+        self.conv5      = torch.nn.Sequential(nn.Conv2d(num_features + feat_out_channels[3], num_features, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.ELU())
         self.upconv4    = upconv(num_features, num_features // 2)
         self.bn4        = nn.BatchNorm2d(num_features // 2, momentum=0.01, affine=True, eps=1.1e-5)
-        self.conv4      = torch.nn.Sequential(nn.Conv2d(num_features // 2 + feat_out_channels[2], num_features // 2, 3, 1, 1, bias=False),
+        self.conv4      = torch.nn.Sequential(nn.Conv2d(num_features // 2 + feat_out_channels[2], num_features // 2, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.ELU())
         self.bn4_2      = nn.BatchNorm2d(num_features // 2, momentum=0.01, affine=True, eps=1.1e-5)
         
@@ -137,21 +140,21 @@ class bts(nn.Module):
         self.daspp_12   = atrous_conv(num_features + feat_out_channels[2], num_features // 4, 12)
         self.daspp_18   = atrous_conv(num_features + num_features // 4 + feat_out_channels[2], num_features // 4, 18)
         self.daspp_24   = atrous_conv(num_features + num_features // 2 + feat_out_channels[2], num_features // 4, 24)
-        self.daspp_conv = torch.nn.Sequential(nn.Conv2d(num_features + num_features // 2 + num_features // 4, num_features // 4, 3, 1, 1, bias=False),
+        self.daspp_conv = torch.nn.Sequential(nn.Conv2d(num_features + num_features // 2 + num_features // 4, num_features // 4, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.ELU())
         self.reduc8x8   = reduction_1x1(num_features // 4, num_features // 4, self.params.max_depth)
         self.lpg8x8     = local_planar_guidance(8)
         
         self.upconv3    = upconv(num_features // 4, num_features // 4)
         self.bn3        = nn.BatchNorm2d(num_features // 4, momentum=0.01, affine=True, eps=1.1e-5)
-        self.conv3      = torch.nn.Sequential(nn.Conv2d(num_features // 4 + feat_out_channels[1] + 1, num_features // 4, 3, 1, 1, bias=False),
+        self.conv3      = torch.nn.Sequential(nn.Conv2d(num_features // 4 + feat_out_channels[1] + 1, num_features // 4, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.ELU())
         self.reduc4x4   = reduction_1x1(num_features // 4, num_features // 8, self.params.max_depth)
         self.lpg4x4     = local_planar_guidance(4)
         
         self.upconv2    = upconv(num_features // 4, num_features // 8)
         self.bn2        = nn.BatchNorm2d(num_features // 8, momentum=0.01, affine=True, eps=1.1e-5)
-        self.conv2      = torch.nn.Sequential(nn.Conv2d(num_features // 8 + feat_out_channels[0] + 1, num_features // 8, 3, 1, 1, bias=False),
+        self.conv2      = torch.nn.Sequential(nn.Conv2d(num_features // 8 + feat_out_channels[0] + 1, num_features // 8, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.ELU())
         
         self.reduc2x2   = reduction_1x1(num_features // 8, num_features // 16, self.params.max_depth)
@@ -159,9 +162,9 @@ class bts(nn.Module):
         
         self.upconv1    = upconv(num_features // 8, num_features // 16)
         self.reduc1x1   = reduction_1x1(num_features // 16, num_features // 32, self.params.max_depth, is_final=True)
-        self.conv1      = torch.nn.Sequential(nn.Conv2d(num_features // 16 + 4, num_features // 16, 3, 1, 1, bias=False),
+        self.conv1      = torch.nn.Sequential(nn.Conv2d(num_features // 16 + 4, num_features // 16, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.ELU())
-        self.get_depth  = torch.nn.Sequential(nn.Conv2d(num_features // 16, 1, 3, 1, 1, bias=False),
+        self.get_depth  = torch.nn.Sequential(nn.Conv2d(num_features // 16, 1, kernel_size=3, stride=1, padding=1, bias=False),
                                               nn.Sigmoid())
 
     def forward(self, features, focal):
